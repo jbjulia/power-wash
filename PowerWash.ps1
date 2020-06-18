@@ -1,29 +1,31 @@
-# Get-ExecutionPolicy
-# Set-ExecutionPolicy remoteSigned
-
-Write-Host "You are about to permanently wipe all deleted file memory, do you wish to proceed?" -foreground yellow
-Pause
+<#
+This is an automated script to free up disk space and securely overwrite deleted files. Please make sure you have
+closed out all other programs and files before using this script. Please note: ONLY deleted file memory will be
+overwritten if desired, not ALL free space on disk. Please review the README before continuing.
+#>
 
 param([switch]$Elevated)
-function Check-Admin
+function Test-Admin
 {
     $currentUser = New-Object Security.Principal.WindowsPrincipal $([Security.Principal.WindowsIdentity]::GetCurrent() )
     $currentUser.IsInRole([Security.Principal.WindowsBuiltinRole]::Administrator)
 }
-if ((Check-Admin) -eq $false)
+
+if ((Test-Admin) -eq $false)
 {
     if ($elevated)
     {
-        # Could not elevate, quit
+        # Tried to elevate, did not work, aborting
     }
     else
     {
         Start-Process powershell.exe -Verb RunAs -ArgumentList ('-noprofile -noexit -file "{0}" -elevated' -f ($myinvocation.MyCommand.Definition))
+        Stop-Process -Id $PID
     }
     exit
 }
 
-function Delete-ComputerRestorePoints
+function DeleteComputerRestorePoints
 {
     [CmdletBinding(SupportsShouldProcess = $True)]param(
         [Parameter(
@@ -34,8 +36,8 @@ function Delete-ComputerRestorePoints
         $restorePoints
     )
     begin {
+        Write-Host "Deleting System Restore Points" -Foreground Yellow
         $fullName = "SystemRestore.DeleteRestorePoint"
-        # Check if the type is already loaded
         $isLoaded = $null -ne ([AppDomain]::CurrentDomain.GetAssemblies() | ForEach-Object { $_.GetTypes() } | Where-Object { $_.FullName -eq $fullName })
         if (!$isLoaded)
         {
@@ -48,7 +50,7 @@ function Delete-ComputerRestorePoints
     process {
         foreach ($restorePoint in $restorePoints)
         {
-            if ( $PSCmdlet.ShouldProcess("$( $restorePoint.Description )", "Deleting Restorepoint"))
+            if ( $PSCmdlet.ShouldProcess("$( $restorePoint.Description )", "Deleting Restore Point"))
             {
                 [SystemRestore.DeleteRestorePoint]::SRRemoveRestorePoint($restorePoint.SequenceNumber)
             }
@@ -56,128 +58,184 @@ function Delete-ComputerRestorePoints
     }
 }
 
-Write-Host "Deleting System Restore Points" -foreground yellow
-Get-ComputerRestorePoint | Delete-ComputerRestorePoints # -WhatIf
-
-Write-host "Checking to make sure you have Local Admin rights" -foreground yellow
-if (-NOT ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]"Administrator"))
+function CleanFolders
 {
-    Write-Warning "Please run this script as an Administrator!" -foreground red
-    if (!($psISE))
+    Write-Host "Cleaning Folders" -Foreground Yellow
+    if (Test-Path C:\Config.Msi)
     {
-        "Press any key to continue..."; [void][System.Console]::ReadKey($true)
+        Remove-Item -Path C:\Config.Msi -Force -Recurse -ErrorAction SilentlyContinue
     }
-    exit 1
+    if (Test-Path C:\Intel)
+    {
+        Remove-Item -Path C:\Intel -Force -Recurse -ErrorAction SilentlyContinue
+    }
+    if (Test-Path C:\PerfLogs)
+    {
+        Remove-Item -Path C:\PerfLogs -Force -Recurse -ErrorAction SilentlyContinue
+    }
+    if (Test-Path $env:windir\memory.dmp)
+    {
+        Remove-Item $env:windir\memory.dmp -Force -ErrorAction SilentlyContinue
+    }
 }
 
-Write-Host "Capture current free disk space on Drive C" -foreground yellow
-$FreespaceBefore = (Get-WmiObject win32_logicaldisk -filter "DeviceID='C:'" | Select-Object Freespace).FreeSpace / 1GB
-
-Write-host "Deleting Rouge folders" -foreground yellow
-if (test-path C:\Config.Msi)
+function DeleteWindowsErrorFiles
 {
-    remove-item -Path C:\Config.Msi -force -recurse
+    Write-Host "Deleting Windows Error Reporting Files" -Foreground Yellow
+    if (Test-Path C:\ProgramData\Microsoft\Windows\WER)
+    {
+        Get-ChildItem -Path C:\ProgramData\Microsoft\Windows\WER -Recurse | Remove-Item -Force -Recurse -ErrorAction SilentlyContinue
+    }
 }
-if (test-path c:\Intel)
+
+function RemoveTempFiles
 {
-    remove-item -Path c:\Intel -force -recurse
+    Write-Host "Removing Temp Files" -Foreground Yellow
+    Remove-Item -Path "$env:windir\Temp\*" -Force -Recurse -ErrorAction SilentlyContinue
+    Remove-Item -Path "$env:windir\minidump\*" -Force -Recurse -ErrorAction SilentlyContinue
+    Remove-Item -Path "$env:windir\Prefetch\*" -Force -Recurse -ErrorAction SilentlyContinue
+    Remove-Item -Path "C:\Users\*\AppData\Local\Temp\*" -Force -Recurse -ErrorAction SilentlyContinue
+    Remove-Item -Path "C:\Users\*\AppData\Local\Microsoft\Windows\WER\*" -Force -Recurse -ErrorAction SilentlyContinue
+    Remove-Item -Path "C:\Users\*\AppData\Local\Microsoft\Windows\Temporary Internet Files\*" -Force -Recurse -ErrorAction SilentlyContinue
+    Remove-Item -Path "C:\Users\*\AppData\Local\Microsoft\Windows\IECompatCache\*" -Force -Recurse -ErrorAction SilentlyContinue
+    Remove-Item -Path "C:\Users\*\AppData\Local\Microsoft\Windows\IECompatUaCache\*" -Force -Recurse -ErrorAction SilentlyContinue
+    Remove-Item -Path "C:\Users\*\AppData\Local\Microsoft\Windows\IEDownloadHistory\*" -Force -Recurse -ErrorAction SilentlyContinue
+    Remove-Item -Path "C:\Users\*\AppData\Local\Microsoft\Windows\INetCache\*" -Force -Recurse -ErrorAction SilentlyContinue
+    Remove-Item -Path "C:\Users\*\AppData\Local\Microsoft\Windows\INetCookies\*" -Force -Recurse -ErrorAction SilentlyContinue
+    Remove-Item -Path "C:\Users\*\AppData\Local\Microsoft\Terminal Server Client\Cache\*" -Force -Recurse -ErrorAction SilentlyContinue
 }
-if (test-path c:\PerfLogs)
+
+function RemoveWindowsUpdateDownloads
 {
-    remove-item -Path c:\PerfLogs -force -recurse
+    Write-Host "Removing Windows Update Downloads" -Foreground Yellow
+    Stop-Service wuauserv -Force # -Verbose
+    Stop-Service TrustedInstaller -Force # -Verbose
+    Remove-Item -Path "$env:windir\SoftwareDistribution\*" -Force -Recurse
+    Remove-Item $env:windir\Logs\CBS\* -Force -Recurse
+    Start-Service wuauserv # -Verbose
+    Start-Service TrustedInstaller # -Verbose
 }
-# If (test-path c:\swsetup) {remove-item -Path c:\swsetup -force -recurse} # HP Software and Driver Repository
-if (test-path $env:windir\memory.dmp)
+
+function CheckWindowsCleanup
 {
-    remove-item $env:windir\memory.dmp -force
+    Write-Host "Checking Windows Cleanup Manager Exists" -Foreground Yellow
+    if (!(Test-Path C:\windows\System32\cleanmgr.exe))
+    {
+        Write-Warning "Not Found: Windows Cleanup Manager is now installing"
+        Copy-Item $env:windir\winsxs\amd64_microsoft-windows-cleanmgr_31bf3856ad364e35_6.1.7600.16385_none_c9392808773cd7da\cleanmgr.exe $env:windir\System32
+        Copy-Item $env:windir\winsxs\amd64_microsoft-windows-cleanmgr.resources_31bf3856ad364e35_6.1.7600.16385_en-us_b9cb6194b257cc63\cleanmgr.exe.mui $env:windir\System32\en-US
+    }
 }
 
-Write-host "Deleting Windows Error Reporting files" -foreground yellow
-if (test-path C:\ProgramData\Microsoft\Windows\WER)
+function RunWindowsCleanup
 {
-    Get-ChildItem -Path C:\ProgramData\Microsoft\Windows\WER -Recurse | Remove-Item -force -recurse
+    if (-not(Get-ItemProperty -Path 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Explorer\VolumeCaches\Active Setup Temp Folders' -Name $StateFlags))
+    {
+        Set-ItemProperty -Path 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Explorer\VolumeCaches\Active Setup Temp Folders' -Name $StateFlags -Type DWORD -Value 2
+        Set-ItemProperty -Path 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Explorer\VolumeCaches\BranchCache' -Name $StateFlags -Type DWORD -Value 2
+        Set-ItemProperty -Path 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Explorer\VolumeCaches\Downloaded Program Files' -Name $StateFlags -Type DWORD -Value 2
+        Set-ItemProperty -Path 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Explorer\VolumeCaches\Internet Cache Files' -Name $StateFlags -Type DWORD -Value 2
+        Set-ItemProperty -Path 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Explorer\VolumeCaches\Offline Pages Files' -Name $StateFlags -Type DWORD -Value 2
+        Set-ItemProperty -Path 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Explorer\VolumeCaches\Old ChkDsk Files' -Name $StateFlags -Type DWORD -Value 2
+        Set-ItemProperty -Path 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Explorer\VolumeCaches\Previous Installations' -Name $StateFlags -Type DWORD -Value 2
+        Set-ItemProperty -Path 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Explorer\VolumeCaches\Memory Dump Files' -Name $StateFlags -Type DWORD -Value 2
+        Set-ItemProperty -Path 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Explorer\VolumeCaches\Recycle Bin' -Name $StateFlags -Type DWORD -Value 2
+        Set-ItemProperty -Path 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Explorer\VolumeCaches\Service Pack Cleanup' -Name $StateFlags -Type DWORD -Value 2
+        Set-ItemProperty -Path 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Explorer\VolumeCaches\Setup Log Files' -Name $StateFlags -Type DWORD -Value 2
+        Set-ItemProperty -Path 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Explorer\VolumeCaches\System error memory dump files' -Name $StateFlags -Type DWORD -Value 2
+        Set-ItemProperty -Path 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Explorer\VolumeCaches\System error minidump files' -Name $StateFlags -Type DWORD -Value 2
+        Set-ItemProperty -Path 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Explorer\VolumeCaches\Temporary Files' -Name $StateFlags -Type DWORD -Value 2
+        Set-ItemProperty -Path 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Explorer\VolumeCaches\Temporary Setup Files' -Name $StateFlags -Type DWORD -Value 2
+        Set-ItemProperty -Path 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Explorer\VolumeCaches\Thumbnail Cache' -Name $StateFlags -Type DWORD -Value 2
+        Set-ItemProperty -Path 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Explorer\VolumeCaches\Update Cleanup' -Name $StateFlags -Type DWORD -Value 2
+        Set-ItemProperty -Path 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Explorer\VolumeCaches\Upgrade Discarded Files' -Name $StateFlags -Type DWORD -Value 2
+        Set-ItemProperty -Path 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Explorer\VolumeCaches\User file versions' -Name $StateFlags -Type DWORD -Value 2
+        Set-ItemProperty -Path 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Explorer\VolumeCaches\Windows Defender' -Name $StateFlags -Type DWORD -Value 2
+        Set-ItemProperty -Path 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Explorer\VolumeCaches\Windows Error Reporting Archive Files' -Name $StateFlags -Type DWORD -Value 2
+        Set-ItemProperty -Path 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Explorer\VolumeCaches\Windows Error Reporting Queue Files' -Name $StateFlags -Type DWORD -Value 2
+        Set-ItemProperty -Path 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Explorer\VolumeCaches\Windows Error Reporting System Archive Files' -Name $StateFlags -Type DWORD -Value 2
+        Set-ItemProperty -Path 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Explorer\VolumeCaches\Windows Error Reporting System Queue Files' -Name $StateFlags -Type DWORD -Value 2
+        Set-ItemProperty -Path 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Explorer\VolumeCaches\Windows Error Reporting Temp Files' -Name $StateFlags -Type DWORD -Value 2
+        Set-ItemProperty -Path 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Explorer\VolumeCaches\Windows ESD installation files' -Name $StateFlags -Type DWORD -Value 2
+        Set-ItemProperty -Path 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Explorer\VolumeCaches\Windows Upgrade Log Files' -Name $StateFlags -Type DWORD -Value 2
+    }
 }
 
-Write-host "Removing System and User Temp Files" -foreground yellow
-Remove-Item -Path "$env:windir\Temp\*" -Force -Recurse
-Remove-Item -Path "$env:windir\minidump\*" -Force -Recurse
-Remove-Item -Path "$env:windir\Prefetch\*" -Force -Recurse
-Remove-Item -Path "C:\Users\*\AppData\Local\Temp\*" -Force -Recurse
-Remove-Item -Path "C:\Users\*\AppData\Local\Microsoft\Windows\WER\*" -Force -Recurse
-Remove-Item -Path "C:\Users\*\AppData\Local\Microsoft\Windows\Temporary Internet Files\*" -Force -Recurse
-Remove-Item -Path "C:\Users\*\AppData\Local\Microsoft\Windows\IECompatCache\*" -Force -Recurse
-Remove-Item -Path "C:\Users\*\AppData\Local\Microsoft\Windows\IECompatUaCache\*" -Force -Recurse
-Remove-Item -Path "C:\Users\*\AppData\Local\Microsoft\Windows\IEDownloadHistory\*" -Force -Recurse
-Remove-Item -Path "C:\Users\*\AppData\Local\Microsoft\Windows\INetCache\*" -Force -Recurse
-Remove-Item -Path "C:\Users\*\AppData\Local\Microsoft\Windows\INetCookies\*" -Force -Recurse
-Remove-Item -Path "C:\Users\*\AppData\Local\Microsoft\Terminal Server Client\Cache\*" -Force -Recurse
-
-Write-host "Removing Windows Updates Downloads" -foreground yellow
-Stop-Service wuauserv -Force -Verbose
-Stop-Service TrustedInstaller -Force -Verbose
-Remove-Item -Path "$env:windir\SoftwareDistribution\*" -Force -Recurse
-Remove-Item $env:windir\Logs\CBS\* -force -recurse
-Start-Service wuauserv -Verbose
-Start-Service TrustedInstaller -Verbose
-
-Write-host "Checkif Windows Cleanup exists" -foreground yellow
-# Mainly for 2008 servers
-if (!(Test-Path c:\windows\System32\cleanmgr.exe))
+function RunDiskCleanup
 {
-    Write-host "Windows Cleanup NOT installed now installing" -foreground yellow
-    copy-item $env:windir\winsxs\amd64_microsoft-windows-cleanmgr_31bf3856ad364e35_6.1.7600.16385_none_c9392808773cd7da\cleanmgr.exe $env:windir\System32
-    copy-item $env:windir\winsxs\amd64_microsoft-windows-cleanmgr.resources_31bf3856ad364e35_6.1.7600.16385_en-us_b9cb6194b257cc63\cleanmgr.exe.mui $env:windir\System32\en-US
+    Write-Host "Running Windows Disk Cleanup" -Foreground Yellow
+    Start-Process -FilePath CleanMgr.exe -ArgumentList $StateRun  -WindowStyle Hidden -Wait
 }
 
-
-Write-host "Running Windows System Cleanup" -foreground yellow
-# Set StateFlags setting for each item in Windows disk cleanup utility
-$StateFlags = 'StateFlags0013'
-$StateRun = $StateFlags.Substring($StateFlags.get_Length() - 2)
-$StateRun = '/sagerun:' + $StateRun
-if (-not(get-itemproperty -path 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Explorer\VolumeCaches\Active Setup Temp Folders' -name $StateFlags))
+function ClearEventLogs
 {
-    set-itemproperty -path 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Explorer\VolumeCaches\Active Setup Temp Folders' -name $StateFlags -type DWORD -Value 2
-    set-itemproperty -path 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Explorer\VolumeCaches\BranchCache' -name $StateFlags -type DWORD -Value 2
-    set-itemproperty -path 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Explorer\VolumeCaches\Downloaded Program Files' -name $StateFlags -type DWORD -Value 2
-    set-itemproperty -path 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Explorer\VolumeCaches\Internet Cache Files' -name $StateFlags -type DWORD -Value 2
-    set-itemproperty -path 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Explorer\VolumeCaches\Offline Pages Files' -name $StateFlags -type DWORD -Value 2
-    set-itemproperty -path 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Explorer\VolumeCaches\Old ChkDsk Files' -name $StateFlags -type DWORD -Value 2
-    set-itemproperty -path 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Explorer\VolumeCaches\Previous Installations' -name $StateFlags -type DWORD -Value 2
-    set-itemproperty -path 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Explorer\VolumeCaches\Memory Dump Files' -name $StateFlags -type DWORD -Value 2
-    set-itemproperty -path 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Explorer\VolumeCaches\Recycle Bin' -name $StateFlags -type DWORD -Value 2
-    set-itemproperty -path 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Explorer\VolumeCaches\Service Pack Cleanup' -name $StateFlags -type DWORD -Value 2
-    set-itemproperty -path 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Explorer\VolumeCaches\Setup Log Files' -name $StateFlags -type DWORD -Value 2
-    set-itemproperty -path 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Explorer\VolumeCaches\System error memory dump files' -name $StateFlags -type DWORD -Value 2
-    set-itemproperty -path 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Explorer\VolumeCaches\System error minidump files' -name $StateFlags -type DWORD -Value 2
-    set-itemproperty -path 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Explorer\VolumeCaches\Temporary Files' -name $StateFlags -type DWORD -Value 2
-    set-itemproperty -path 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Explorer\VolumeCaches\Temporary Setup Files' -name $StateFlags -type DWORD -Value 2
-    set-itemproperty -path 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Explorer\VolumeCaches\Thumbnail Cache' -name $StateFlags -type DWORD -Value 2
-    set-itemproperty -path 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Explorer\VolumeCaches\Update Cleanup' -name $StateFlags -type DWORD -Value 2
-    set-itemproperty -path 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Explorer\VolumeCaches\Upgrade Discarded Files' -name $StateFlags -type DWORD -Value 2
-    set-itemproperty -path 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Explorer\VolumeCaches\User file versions' -name $StateFlags -type DWORD -Value 2
-    set-itemproperty -path 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Explorer\VolumeCaches\Windows Defender' -name $StateFlags -type DWORD -Value 2
-    set-itemproperty -path 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Explorer\VolumeCaches\Windows Error Reporting Archive Files' -name $StateFlags -type DWORD -Value 2
-    set-itemproperty -path 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Explorer\VolumeCaches\Windows Error Reporting Queue Files' -name $StateFlags -type DWORD -Value 2
-    set-itemproperty -path 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Explorer\VolumeCaches\Windows Error Reporting System Archive Files' -name $StateFlags -type DWORD -Value 2
-    set-itemproperty -path 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Explorer\VolumeCaches\Windows Error Reporting System Queue Files' -name $StateFlags -type DWORD -Value 2
-    set-itemproperty -path 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Explorer\VolumeCaches\Windows Error Reporting Temp Files' -name $StateFlags -type DWORD -Value 2
-    set-itemproperty -path 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Explorer\VolumeCaches\Windows ESD installation files' -name $StateFlags -type DWORD -Value 2
-    set-itemproperty -path 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Explorer\VolumeCaches\Windows Upgrade Log Files' -name $StateFlags -type DWORD -Value 2
+    Write-Host "Clearing All Event Logs" -Foreground Yellow
+    wevtutil el | Foreach-Object { wevtutil cl "$_" } # { Write-Host "Clearing $_"; wevtutil cl "$_" }
 }
 
-Write-host "Starting CleanMgr.exe..." -foreground yellow
-Start-Process -FilePath CleanMgr.exe -ArgumentList $StateRun  -WindowStyle Hidden -Wait
+function EmptyRecycleBin
+{
+    Write-Host "Emptying Recycle Bin" -Foreground Yellow
+    Clear-RecycleBin -Force # Clear contents of ALL Recycle Bins
+}
 
-Write-host "Clearing All Event Logs" -foreground yellow
-wevtutil el | Foreach-Object { Write-Host "Clearing $_"; wevtutil cl "$_" }
+function OverwriteDeletedFiles
+{
+    Write-Host "Would you like to overwite all deleted files? (Default is No)" -Foreground Green
+    $ReadHost = Read-Host " ( y / n ) "
+    switch ($ReadHost)
+    {
+        Y {
+            Write-Host "Overwriting Free Space..." -Foreground Yellow
+            Cipher /w:C: # Securely overwrite ONLY deleted files
+        }
+        N {
+            Write-Host("Skipping file overwrite") -Foreground Red
+        }
+        Default {
+            Write-Host("Skipping file overwrite") -Foreground Red
+        }
+    }
+    if (Test-Path C:\EFSTMPWP)
+    {
+        Remove-Item -Path C:\EFSTMPWP -Force -Recurse -ErrorAction SilentlyContinue
+    }
+}
 
-Write-Host "Overwriting free space..." -foreground yellow
-Clear-RecycleBin -Force # Clear contents of ALL Recycle Bins
-Cipher /w:C: # Securely overwrite ONLY deleted files
+function GetFreeSpace
+{
+    Write-Host "Disk Usage before and after cleanup" -Foreground Green
+    $FreeSpaceAfter = (Get-WmiObject win32_logicaldisk -Filter "DeviceID='C:'" | Select-Object Freespace).FreeSpace / 1GB
+    "-------------------------------------------------------------------------------------------------------------"
+    "Free Space Before:     {0:0.##}" -f $FreeSpaceBefore
+    "Free Space After:      {0:0.##}" -f $FreeSpaceAfter
+    "-------------------------------------------------------------------------------------------------------------"
+}
 
-Write-host "Disk Usage before and after cleanup" -foreground green
-$FreespaceAfter = (Get-WmiObject win32_logicaldisk -filter "DeviceID='C:'" | Select-Object Freespace).FreeSpace / 1GB
-"Free Space Before: {0}" -f $FreespaceBefore
-"Free Space After: {0}" -f $FreespaceAfter
+Write-Host "You are about to Power Wash your computer, do you wish to proceed? (Default is Yes)" -Foreground Green
+$ReadHost = Read-Host " ( y / n ) "
+switch ($ReadHost)
+{
+    Y {
+        $FreeSpaceBefore = (Get-WmiObject win32_logicaldisk -Filter "DeviceID='C:'" | Select-Object Freespace).FreeSpace / 1GB
+        $StateFlags = 'StateFlags0013' # Set StateFlags setting for each item in Windows Disk Cleanup Utility
+        $StateRun = $StateFlags.Substring($StateFlags.get_Length() - 2)
+        $StateRun = '/sagerun:' + $StateRun
 
+        Get-ComputerRestorePoint | DeleteComputerRestorePoints # -WhatIf
+        CleanFolders
+        DeleteWindowsErrorFiles
+        RemoveTempFiles
+        RemoveWindowsUpdateDownloads
+        CheckWindowsCleanup
+        RunWindowsCleanup
+        RunDiskCleanup
+        ClearEventLogs
+        EmptyRecycleBin
+        OverwriteDeletedFiles
+        GetFreeSpace
+    }
+    N {
+        exit
+    }
+}
